@@ -1,1 +1,205 @@
-
+AWSTemplateFormatVersion: 2010-09-09
+Description: Dev EMR Cluster for Spark and Jupyter - 6.0.0
+Parameters:
+  EMRClusterName:
+    Description: Name of the cluster
+    Type: String
+    Default: dev-mnd-jupyterhub
+  KeyName:
+    Description: Must be an existing Keyname
+    Type: String
+    Default: EMR-power-services
+  MasterInstanceType:
+    Description: Instance type to be used for the master instance.
+    Type: String
+    Default: r5a.4xlarge
+  CoreInstanceType:
+    Description: Instance type to be used for core instances.
+    Type: String
+    Default: m5.2xlarge
+  NumberOfCoreInstances:
+    Description: Must be a valid number
+    Type: Number
+    Default: 1
+  TaskInstanceType:
+    Description: Instance type to be used for task instances.
+    Type: String
+    Default: r5.2xlarge
+  NumberOfTaskInstances:
+    Description: Must be a valid number
+    Type: Number
+    Default: 1
+  SubnetID:
+    Description: Must be Valid public subnet ID
+    Default: subnet-cd377295
+    Type: String
+  AdditionalMasterSecurityGroups:
+    Default: 'sg-64cf792f,sg-93c771d8'
+    Type: CommaDelimitedList
+  AdditionalSlaveSecurityGroups:
+    Default: 'sg-64cf792f,sg-75b3053e'
+    Type: CommaDelimitedList
+  LogUri:
+    Description: Must be a valid S3 URL for logging
+    Default: 's3://aws-logs-564772463473-us-east-1/elasticmapreduce/'
+    Type: String
+  S3DataUri:
+    Description: Must be a valid S3 bucket URL for bootstrap script
+    Default: 's3://ge-engineering/'
+    Type: String
+  ReleaseLabel:
+    Description: Must be a valid EMR release  version
+    Default: emr-6.0.0
+    Type: String
+  Name:
+    Description: Name of the instance
+    Default: dev-mnd-jupyterhub-emr600
+    Type: String
+  env:
+    Description: Type of environment - dev or prd
+    Default: dev
+    Type: String
+  uai:
+    Description: The uai value
+    Default: UAI2005971
+    Type: String
+  role:
+   Description: InstanceProfile role
+   Default: bu-pw-mnd-jupyterHUB
+   Type: String
+Mappings: {}
+Resources:
+  EMRCluster:
+    Type: 'AWS::EMR::Cluster'
+    Properties:
+      Applications:
+        - Name: Hadoop
+        - Name: Hive
+        - Name: Spark
+        - Name: Ganglia
+        - Name: Tez
+        - Name: ZooKeeper
+        - Name: Hue
+        - Name: Livy
+        - Name: Presto
+        - Name: Zeppelin
+      Configurations:
+        - Classification: hive-site
+          ConfigurationProperties:
+            javax.jdo.option.ConnectionURL: >-
+                jdbc:mysql://dev-emrtshistorical.cwlobnkcucq3.us-east-1.rds.amazonaws.com:3306/devemrmysql?createDatabaseIfNotExist=true
+            javax.jdo.option.ConnectionDriverName: org.mariadb.jdbc.Driver
+            javax.jdo.option.ConnectionUserName: mysqlmaster
+            javax.jdo.option.ConnectionPassword: P0wer5ervic3s
+        - Classification: hive
+          ConfigurationProperties:
+            hive.llap.enabled: 'true'
+            hive.llap.percent-allocation: '0.4'
+            hive.llap.num-instances: '3'
+      EbsRootVolumeSize: 30
+      Instances:
+        Ec2KeyName: !Ref KeyName
+        Ec2SubnetId: !Ref SubnetID
+        AdditionalMasterSecurityGroups: !Ref AdditionalMasterSecurityGroups
+        AdditionalSlaveSecurityGroups: !Ref AdditionalSlaveSecurityGroups
+        MasterInstanceGroup:
+          EbsConfiguration:
+            EbsBlockDeviceConfigs:
+              - VolumeSpecification:
+                  SizeInGB: 500
+                  VolumeType: gp2
+                VolumesPerInstance: 1
+            EbsOptimized: 'true'
+          InstanceCount: 1
+          InstanceType: !Ref MasterInstanceType
+          Market: ON_DEMAND
+          Name: Master
+        CoreInstanceGroup:
+          EbsConfiguration:
+            EbsBlockDeviceConfigs:
+              - VolumeSpecification:
+                  SizeInGB: 100
+                  VolumeType: gp2
+                VolumesPerInstance: 1
+            EbsOptimized: 'true'
+          InstanceCount: !Ref NumberOfCoreInstances
+          InstanceType: !Ref CoreInstanceType
+          Market: ON_DEMAND
+          Name: Core
+        TerminationProtected: false
+      VisibleToAllUsers: true
+      JobFlowRole: !Ref role
+      ReleaseLabel: !Ref ReleaseLabel
+      LogUri: !Ref LogUri
+      Name: !Ref EMRClusterName
+      BootstrapActions:
+        - Name: Install Users
+          ScriptBootstrapAction:
+            Path: 's3://ge-engineering/powerservices-setup/mnd-prd/scripts/exe-user.sh'
+        - Name: Install Jupyter
+          ScriptBootstrapAction:
+            Path: 's3://ge-engineering/powerservices-setup/mnd-dev/scripts/jupyterhub_emr6_bootstrap_dev.sh'
+      ServiceRole: EMR_DefaultRole
+      AutoScalingRole: EMR_AutoScaling_DefaultRole
+      Tags:
+        - Key: env
+          Value: !Ref env
+        - Key: Name
+          Value: !Ref Name
+        - Key: uai
+          Value: !Ref uai
+  EMRTaskNodes:
+    Type: 'AWS::EMR::InstanceGroupConfig'
+    Properties:
+        InstanceCount: !Ref NumberOfTaskInstances
+        InstanceType: !Ref TaskInstanceType
+        InstanceRole: TASK
+        Market: ON_DEMAND
+        Name: TaskInstance
+        JobFlowId: !Ref EMRCluster
+        AutoScalingPolicy:
+          Constraints:
+            MinCapacity: 1
+            MaxCapacity: 5
+          Rules:
+            - Name: Scale-out
+              Description: Scale-out policy
+              Action:
+                SimpleScalingPolicyConfiguration:
+                  AdjustmentType: CHANGE_IN_CAPACITY
+                  ScalingAdjustment: 1
+                  CoolDown: 300
+              Trigger:
+                CloudWatchAlarmDefinition:
+                  Dimensions:
+                    - Key: JobFlowId
+                      Value: '${emr.clusterId}'
+                  EvaluationPeriods: 1
+                  Namespace: AWS/ElasticMapReduce
+                  Period: 300
+                  ComparisonOperator: LESS_THAN
+                  Statistic: AVERAGE
+                  Threshold: 35
+                  Unit: PERCENT
+                  MetricName: YARNMemoryAvailablePercentage
+            - Name: Scale-in
+              Description: Scale-in policy
+              Action:
+                SimpleScalingPolicyConfiguration:
+                  AdjustmentType: CHANGE_IN_CAPACITY
+                  ScalingAdjustment: -1
+                  CoolDown: 300
+              Trigger:
+                CloudWatchAlarmDefinition:
+                  Dimensions:
+                    - Key: JobFlowId
+                      Value: '${emr.clusterId}'
+                  EvaluationPeriods: 1
+                  Namespace: AWS/ElasticMapReduce
+                  Period: 300
+                  ComparisonOperator: GREATER_THAN
+                  Statistic: AVERAGE
+                  Threshold: 75
+                  Unit: PERCENT
+                  MetricName: YARNMemoryAvailablePercentage
+Outputs: {}
